@@ -87,6 +87,20 @@ async def init_db():
             # Column already exists, ignore
             pass
 
+        # Add parent_post_id column to posts table for replies
+        try:
+            await db.execute("ALTER TABLE posts ADD COLUMN parent_post_id INTEGER REFERENCES posts(id) ON DELETE CASCADE")
+        except aiosqlite.OperationalError:
+            # Column already exists, ignore
+            pass
+
+        # Add is_reply column to posts table
+        try:
+            await db.execute("ALTER TABLE posts ADD COLUMN is_reply BOOLEAN DEFAULT 0")
+        except aiosqlite.OperationalError:
+            # Column already exists, ignore
+            pass
+
         await db.commit()
 
 async def get_db():

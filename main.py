@@ -42,7 +42,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://ashtonashton.net",
-        "https://drive.ashtonashton.net"
+        "https://drive.ashtonashton.net",
+        "http://localhost:3000",  # React development server
+        "http://127.0.0.1:3000",  # Alternative localhost
+        "http://localhost:3001",  # React dev server (alternate port)
+        "http://127.0.0.1:3001",   # Alternative localhost (alternate port)
+        "http://localhost:3002",  # React dev server (alternate port)
+        "http://127.0.0.1:3002" 
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -67,7 +73,7 @@ async def startup():
     os.makedirs(STORAGE_PATH, exist_ok=True)
 
 @app.post("/register")
-@limiter.limit("2/minute")
+@limiter.limit("10/minute")
 async def register(
     request: Request,
     username: str = Form(...),
@@ -107,7 +113,7 @@ async def register(
         raise HTTPException(status_code=400, detail="Username already exists")
 
 @app.post("/login")
-@limiter.limit("10/minute")
+@limiter.limit("30/minute")
 async def login(
     request: Request,
     username: str = Form(...),
@@ -164,7 +170,7 @@ async def list_files(
     }
 
 @app.post("/upload")
-@limiter.limit("20/minute")
+@limiter.limit("50/minute")
 async def upload_file(
     request: Request,
     file: UploadFile = File(...),
@@ -234,7 +240,7 @@ async def upload_file(
     }
 
 @app.get("/download/{file_id}")
-@limiter.limit("20/minute")
+@limiter.limit("50/minute")
 async def download_file(
     request: Request,
     file_id: int,
@@ -314,7 +320,7 @@ async def get_usage(
 # Social Media Endpoints
 
 @app.post("/posts/text")
-@limiter.limit("20/minute")
+@limiter.limit("30/minute")
 async def create_text_post(
     request: Request,
     content: str = Form(...),
@@ -346,7 +352,7 @@ async def create_text_post(
     }
 
 @app.post("/posts/file")
-@limiter.limit("20/minute")
+@limiter.limit("30/minute")
 async def create_file_post(
     request: Request,
     file: UploadFile = File(...),
@@ -431,20 +437,21 @@ async def get_feed(
     limit = 20
     offset = (page - 1) * limit
 
-    # Fetch posts with file information if applicable
+    # Fetch posts with file information if applicable (exclude replies)
     async with db.execute(
         """SELECT p.id, p.user_id, p.post_type, p.content, p.caption,
                   p.created_at, p.file_id,
                   f.original_filename, f.file_size, f.mime_type
            FROM posts p
            LEFT JOIN files f ON p.file_id = f.id
+           WHERE p.is_reply = 0 OR p.is_reply IS NULL
            ORDER BY p.created_at DESC
            LIMIT ? OFFSET ?""",
         (limit, offset)
     ) as cursor:
         posts = await cursor.fetchall()
 
-    # Build response with dislike counts
+    # Build response with dislike counts and reply counts
     result_posts = []
     for p in posts:
         post_id = p[0]
@@ -457,6 +464,15 @@ async def get_feed(
             dislike_count_row = await cursor.fetchone()
 
         dislike_count = dislike_count_row[0] if dislike_count_row else 0
+
+        # Get reply count for this post
+        async with db.execute(
+            "SELECT COUNT(*) FROM posts WHERE parent_post_id = ? AND is_reply = 1",
+            (post_id,)
+        ) as cursor:
+            reply_count_row = await cursor.fetchone()
+
+        reply_count = reply_count_row[0] if reply_count_row else 0
 
         # Check if current user disliked this post
         async with db.execute(
@@ -475,6 +491,7 @@ async def get_feed(
             "created_at": p[5],
             "is_deletable": p[1] == current_user["id"],
             "dislike_count": dislike_count,
+            "reply_count": reply_count,
             "is_disliked": is_disliked,  # True if current user disliked
             "file": {
                 "id": p[6],
@@ -561,7 +578,7 @@ async def download_post_file(
     return FileResponse(file_path, filename=original_filename)
 
 @app.post("/change_password/{user_id}")
-@limiter.limit("1/minute")
+@limiter.limit("5/minute")
 async def login(
     request: Request,
     username: str = Form(...),
@@ -582,7 +599,7 @@ async def login(
     return {"token": token, "username": user[1]}
 
 @app.post("/change-password")
-@limiter.limit("3/minute")
+@limiter.limit("5/minute")
 async def change_password(
     request: Request,
     current_password: str = Form(...),
@@ -653,6 +670,221 @@ async def toggle_dislike(
         )
         await db.commit()
         return {"message": "Dislike added", "action": "added", "is_disliked": True}
+
+# Reply Endpoints
+
+@app.post("/posts/{post_id}/reply/text")
+@limiter.limit("30/minute")
+async def create_text_reply(
+    request: Request,
+    post_id: int,
+    content: str = Form(...),
+    current_user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db)
+):
+    """Create a text reply to a post"""
+    # Check if parent post exists
+    async with db.execute(
+        "SELECT id, is_reply FROM posts WHERE id = ?",
+        (post_id,)
+    ) as cursor:
+        parent_post = await cursor.fetchone()
+
+    if not parent_post:
+        raise HTTPException(status_code=404, detail="Parent post not found")
+
+    # Prevent replying to replies
+    if parent_post[1]:  # is_reply is True
+        raise HTTPException(status_code=400, detail="Cannot reply to a reply")
+
+    # Validate content length
+    if len(content) > 1000:
+        raise HTTPException(status_code=400, detail="Text content exceeds 1000 character limit")
+
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="Content cannot be empty")
+
+    # Insert reply into database
+    async with db.execute(
+        """INSERT INTO posts (user_id, post_type, content, is_reply, parent_post_id)
+           VALUES (?, ?, ?, 1, ?)""",
+        (current_user["id"], "text", content, post_id)
+    ) as cursor:
+        await db.commit()
+        reply_id = cursor.lastrowid
+
+    return {
+        "id": reply_id,
+        "post_type": "text",
+        "content": content,
+        "parent_post_id": post_id,
+        "message": "Reply created successfully"
+    }
+
+@app.post("/posts/{post_id}/reply/file")
+@limiter.limit("30/minute")
+async def create_file_reply(
+    request: Request,
+    post_id: int,
+    file: UploadFile = File(...),
+    caption: str = Form(None),
+    current_user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db)
+):
+    """Create a file reply to a post"""
+    MAX_POST_FILE_SIZE = 100 * 1024 * 1024  # 100MB limit for posts
+
+    # Check if parent post exists
+    async with db.execute(
+        "SELECT id, is_reply FROM posts WHERE id = ?",
+        (post_id,)
+    ) as cursor:
+        parent_post = await cursor.fetchone()
+
+    if not parent_post:
+        raise HTTPException(status_code=404, detail="Parent post not found")
+
+    # Prevent replying to replies
+    if parent_post[1]:  # is_reply is True
+        raise HTTPException(status_code=400, detail="Cannot reply to a reply")
+
+    # Validate caption length if provided
+    if caption and len(caption) > 1000:
+        raise HTTPException(status_code=400, detail="Caption exceeds 1000 character limit")
+
+    # Generate unique filename
+    original_filename = sanitize_filename(file.filename)
+    file_ext = os.path.splitext(original_filename)[1]
+    stored_filename = f"{uuid.uuid4()}{file_ext}"
+    file_path = os.path.join(STORAGE_PATH, stored_filename)
+
+    if file_ext in BLOCKED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type {file_ext} is not allowed for security reasons"
+        )
+
+    # Read and save file
+    file_size = 0
+    try:
+        with open(file_path, "wb") as f:
+            while chunk := await file.read(8192):
+                file_size += len(chunk)
+                if file_size > MAX_POST_FILE_SIZE:
+                    os.remove(file_path)
+                    raise HTTPException(status_code=413, detail="File too large (max 100MB for posts)")
+                f.write(chunk)
+    except Exception as e:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise e
+
+    # Save file to database with is_public=1
+    async with db.execute(
+        """INSERT INTO files (user_id, original_filename, stored_filename,
+           file_size, mime_type, file_path, is_public)
+           VALUES (?, ?, ?, ?, ?, ?, 1)""",
+        (current_user["id"], file.filename, stored_filename, file_size,
+         file.content_type, file_path)
+    ) as cursor:
+        await db.commit()
+        file_id = cursor.lastrowid
+
+    # Create reply with file_id
+    async with db.execute(
+        """INSERT INTO posts (user_id, post_type, file_id, caption, is_reply, parent_post_id)
+           VALUES (?, ?, ?, ?, 1, ?)""",
+        (current_user["id"], "file", file_id, caption, post_id)
+    ) as cursor:
+        await db.commit()
+        reply_id = cursor.lastrowid
+
+    return {
+        "id": reply_id,
+        "post_type": "file",
+        "file_id": file_id,
+        "filename": file.filename,
+        "size": file_size,
+        "caption": caption,
+        "parent_post_id": post_id,
+        "message": "Reply created successfully"
+    }
+
+@app.get("/posts/{post_id}/replies")
+async def get_replies(
+    post_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db)
+):
+    """Get all replies for a specific post (anonymous - no usernames shown)"""
+    # Check if parent post exists
+    async with db.execute("SELECT id, is_reply FROM posts WHERE id = ?", (post_id,)) as cursor:
+        parent_post = await cursor.fetchone()
+
+    if not parent_post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    # Don't allow getting replies of a reply
+    if parent_post[1]:
+        raise HTTPException(status_code=400, detail="Cannot get replies of a reply")
+
+    # Fetch replies with file information if applicable (no username)
+    async with db.execute(
+        """SELECT p.id, p.user_id, p.post_type, p.content, p.caption,
+                  p.created_at, p.file_id,
+                  f.original_filename, f.file_size, f.mime_type
+           FROM posts p
+           LEFT JOIN files f ON p.file_id = f.id
+           WHERE p.parent_post_id = ? AND p.is_reply = 1
+           ORDER BY p.created_at ASC""",
+        (post_id,)
+    ) as cursor:
+        replies = await cursor.fetchall()
+
+    # Build response (anonymous - no user identifiers)
+    result_replies = []
+    for r in replies:
+        reply_id = r[0]
+
+        # Get dislike count for this reply
+        async with db.execute(
+            "SELECT COUNT(*) FROM reactions WHERE post_id = ?",
+            (reply_id,)
+        ) as cursor:
+            dislike_count_row = await cursor.fetchone()
+
+        dislike_count = dislike_count_row[0] if dislike_count_row else 0
+
+        # Check if current user disliked this reply
+        async with db.execute(
+            "SELECT id FROM reactions WHERE post_id = ? AND user_id = ?",
+            (reply_id, current_user["id"])
+        ) as cursor:
+            user_dislike_row = await cursor.fetchone()
+
+        is_disliked = user_dislike_row is not None
+
+        result_replies.append({
+            "id": reply_id,
+            "post_type": r[2],
+            "content": r[3] if r[2] == "text" else None,
+            "caption": r[4],
+            "created_at": r[5],
+            "is_deletable": r[1] == current_user["id"],  # Can still delete own replies
+            "dislike_count": dislike_count,
+            "is_disliked": is_disliked,
+            "file": {
+                "id": r[6],
+                "filename": r[7],
+                "size": r[8],
+                "mime_type": r[9]
+            } if r[2] == "file" else None
+        })
+
+    return {
+        "replies": result_replies,
+        "count": len(result_replies)
+    }
 
 @app.get("/health")
 async def health_check():
@@ -803,20 +1035,21 @@ async def get_admin_feed(
     limit = 20
     offset = (page - 1) * limit
 
-    # Fetch posts with file information if applicable
+    # Fetch posts with file information if applicable (exclude replies)
     async with db.execute(
         """SELECT p.id, p.user_id, p.post_type, p.content, p.caption,
                 p.created_at, p.file_id,
                 f.original_filename, f.file_size, f.mime_type
         FROM posts p
         LEFT JOIN files f ON p.file_id = f.id
+        WHERE p.is_reply = 0 OR p.is_reply IS NULL
         ORDER BY p.created_at DESC
         LIMIT ? OFFSET ?""",
         (limit, offset)
     ) as cursor:
         posts = await cursor.fetchall()
 
-    # Build response with dislike counts
+    # Build response with dislike counts and reply counts
     result_posts = []
     for p in posts:
         post_id = p[0]
@@ -829,6 +1062,15 @@ async def get_admin_feed(
             dislike_count_row = await cursor.fetchone()
 
         dislike_count = dislike_count_row[0] if dislike_count_row else 0
+
+        # Get reply count for this post
+        async with db.execute(
+            "SELECT COUNT(*) FROM posts WHERE parent_post_id = ? AND is_reply = 1",
+            (post_id,)
+        ) as cursor:
+            reply_count_row = await cursor.fetchone()
+
+        reply_count = reply_count_row[0] if reply_count_row else 0
 
         # Check if current user disliked this post
         async with db.execute(
@@ -857,6 +1099,7 @@ async def get_admin_feed(
             "created_at": p[5],
             "is_deletable": p[1] == admin_user["id"],
             "dislike_count": dislike_count,
+            "reply_count": reply_count,
             "is_disliked": is_disliked,  # True if current user disliked
             "file": {
                 "id": p[6],
