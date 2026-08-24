@@ -1,0 +1,10 @@
+fastapi==0.121.0
+uvicorn==0.33.0
+sqlalchemy==2.0.36
+greenlet==3.5.5
+asyncpg==0.30.0
+alembic==1.14.0
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+python-multipart==0.0.20
+slowapi==0.1.9

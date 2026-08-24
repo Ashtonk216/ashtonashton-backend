@@ -1,0 +1,23 @@
+image:
+  repository: ashtonk216/drive-backend
+  tag: latest
+  pullPolicy: Always
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+# Pre-existing secret this chart references but does not create or manage.
+postgresSecretName: drive-postgres-credentials
+
+env:
+  maxFileSize: "524288000"   # 500MB
+
+# PVC for uploaded files only now (DB moved to Postgres) -- must survive pod restarts.
+storage:
+  size: 20Gi
+  storageClassName: ""   # empty = cluster default

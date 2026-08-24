@@ -1,0 +1,20 @@
+image:
+  repository: ashtonk216/social-backend
+  tag: latest
+  pullPolicy: Always
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+# Pre-existing secret this chart references but does not create or manage.
+postgresSecretName: social-postgres-credentials
+
+# PVC for post attachment files only now (DB moved to Postgres) -- must survive pod restarts.
+storage:
+  size: 10Gi
+  storageClassName: ""   # empty = cluster default

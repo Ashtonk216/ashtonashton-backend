@@ -1,0 +1,6 @@
+apiVersion: v2
+name: social
+description: Social (posts/feed) backend for ashtonashton.net
+type: application
+version: 0.1.0
+appVersion: "1.0"
