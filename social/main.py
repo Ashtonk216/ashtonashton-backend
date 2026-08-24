@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Form, Request
+from fastapi import FastAPI, APIRouter, File, UploadFile, Depends, HTTPException, Form, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func, delete
@@ -60,11 +60,18 @@ async def startup():
     # Schema is managed by Alembic migrations, not created here.
     os.makedirs(STORAGE_PATH, exist_ok=True)
 
-@app.get("/me")
+# Real API routes live under /api -- lets Traefik route by a single
+# PathPrefix(`/api`) to this service and everything else to the frontend,
+# without needing a Traefik rule per endpoint. /health and / stay
+# unprefixed since Kubernetes probes and basic liveness checks hit them
+# directly.
+api = APIRouter(prefix="/api")
+
+@api.get("/me")
 async def me(identity: Identity = Depends(get_identity)):
     return {"username": identity.username, "role": identity.role}
 
-@app.post("/posts/text")
+@api.post("/posts/text")
 @limiter.limit("30/minute")
 async def create_text_post(
     request: Request,
@@ -93,7 +100,7 @@ async def create_text_post(
         "message": "Text post created successfully"
     }
 
-@app.post("/posts/file")
+@api.post("/posts/file")
 @limiter.limit("30/minute")
 async def create_file_post(
     request: Request,
@@ -160,7 +167,7 @@ async def create_file_post(
         "message": "File post created successfully"
     }
 
-@app.get("/feed")
+@api.get("/feed")
 async def get_feed(
     page: int = 1,
     identity: Identity = Depends(get_identity),
@@ -222,7 +229,7 @@ async def get_feed(
         "per_page": limit
     }
 
-@app.delete("/posts/{post_id}")
+@api.delete("/posts/{post_id}")
 async def delete_post(
     post_id: int,
     identity: Identity = Depends(get_identity),
@@ -249,7 +256,7 @@ async def delete_post(
 
     return {"message": "Post deleted successfully"}
 
-@app.get("/posts/{post_id}/download")
+@api.get("/posts/{post_id}/download")
 async def download_post_file(
     post_id: int,
     identity: Identity = Depends(get_identity),
@@ -269,7 +276,7 @@ async def download_post_file(
 
     return FileResponse(file_record.file_path, filename=file_record.original_filename)
 
-@app.post("/posts/{post_id}/dislike")
+@api.post("/posts/{post_id}/dislike")
 async def toggle_dislike(
     post_id: int,
     identity: Identity = Depends(get_identity),
@@ -295,7 +302,7 @@ async def toggle_dislike(
 
 # Reply Endpoints
 
-@app.post("/posts/{post_id}/reply/text")
+@api.post("/posts/{post_id}/reply/text")
 @limiter.limit("30/minute")
 async def create_text_reply(
     request: Request,
@@ -336,7 +343,7 @@ async def create_text_reply(
         "message": "Reply created successfully"
     }
 
-@app.post("/posts/{post_id}/reply/file")
+@api.post("/posts/{post_id}/reply/file")
 @limiter.limit("30/minute")
 async def create_file_reply(
     request: Request,
@@ -415,7 +422,7 @@ async def create_file_reply(
         "message": "Reply created successfully"
     }
 
-@app.get("/posts/{post_id}/replies")
+@api.get("/posts/{post_id}/replies")
 async def get_replies(
     post_id: int,
     identity: Identity = Depends(get_identity),
@@ -483,7 +490,7 @@ async def root():
 # content-moderation endpoints that need this app's own posts/reactions
 # tables stay here, gated on the super role from the identity headers.
 
-@app.delete("/admin/posts/{post_id}")
+@api.delete("/admin/posts/{post_id}")
 async def admin_delete_post(
     post_id: int,
     identity: Identity = Depends(require_role("super")),
@@ -506,7 +513,7 @@ async def admin_delete_post(
 
     return {"message": "Post deleted successfully"}
 
-@app.get("/admin/feed")
+@api.get("/admin/feed")
 async def get_admin_feed(
     page: int = 1,
     identity: Identity = Depends(require_role("super")),
@@ -574,3 +581,5 @@ def sanitize_filename(filename):
     filename = os.path.basename(filename)
     filename = re.sub(r'[^\w\s\-\.]', '', filename)
     return filename[:255]  # Limit length
+
+app.include_router(api)

@@ -1,6 +1,6 @@
 image:
-  repository: ashtonk216/drive-backend
-  tag: latest
+  repository: ashtonk216/ashtonashton-drive
+  tag: "0.2.0"
   pullPolicy: Always
 
 resources:

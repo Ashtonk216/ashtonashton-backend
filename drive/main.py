@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Request
+from fastapi import FastAPI, APIRouter, File, UploadFile, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
@@ -60,11 +60,18 @@ async def startup():
     # Schema is managed by Alembic migrations, not created here.
     os.makedirs(STORAGE_PATH, exist_ok=True)
 
-@app.get("/me")
+# Real API routes live under /api -- lets Traefik route by a single
+# PathPrefix(`/api`) to this service and everything else to the frontend,
+# without needing a Traefik rule per endpoint. /health and / stay
+# unprefixed since Kubernetes probes and basic liveness checks hit them
+# directly.
+api = APIRouter(prefix="/api")
+
+@api.get("/me")
 async def me(identity: Identity = Depends(get_identity)):
     return {"username": identity.username, "role": identity.role}
 
-@app.get("/files")
+@api.get("/files")
 async def list_files(
     identity: Identity = Depends(get_identity),
     db: AsyncSession = Depends(get_db)
@@ -90,7 +97,7 @@ async def list_files(
         ]
     }
 
-@app.post("/upload")
+@api.post("/upload")
 @limiter.limit("50/minute")
 async def upload_file(
     request: Request,
@@ -154,7 +161,7 @@ async def upload_file(
         "message": "Upload successful"
     }
 
-@app.get("/download/{file_id}")
+@api.get("/download/{file_id}")
 @limiter.limit("50/minute")
 async def download_file(
     request: Request,
@@ -176,7 +183,7 @@ async def download_file(
 
     return FileResponse(file_record.file_path, filename=file_record.original_filename)
 
-@app.delete("/files/{file_id}")
+@api.delete("/files/{file_id}")
 async def delete_file(
     file_id: int,
     identity: Identity = Depends(get_identity),
@@ -203,7 +210,7 @@ async def delete_file(
 
     return {"message": "File deleted"}
 
-@app.get("/usage")
+@api.get("/usage")
 async def get_usage(
     identity: Identity = Depends(get_identity),
     db: AsyncSession = Depends(get_db)
@@ -228,3 +235,5 @@ def sanitize_filename(filename):
     filename = os.path.basename(filename)
     filename = re.sub(r'[^\w\s\-\.]', '', filename)
     return filename[:255]  # Limit length
+
+app.include_router(api)

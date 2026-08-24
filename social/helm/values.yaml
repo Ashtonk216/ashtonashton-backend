@@ -1,6 +1,6 @@
 image:
-  repository: ashtonk216/social-backend
-  tag: latest
+  repository: ashtonk216/ashtonashton-social
+  tag: "0.2.0"
   pullPolicy: Always
 
 resources:
@@ -17,4 +17,4 @@ postgresSecretName: social-postgres-credentials
 # PVC for post attachment files only now (DB moved to Postgres) -- must survive pod restarts.
 storage:
   size: 10Gi
-  storageClassName: ""   # empty = cluster default
+  storageClassName: "" # empty = cluster default
