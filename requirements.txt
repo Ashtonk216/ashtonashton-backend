@@ -1,8 +1,0 @@
-fastapi==0.121.0
-uvicorn==0.33.0
-aiosqlite==0.20.0
-bcrypt==5.0.0
-PyJWT==2.9.0
-python-dotenv==1.0.1
-python-multipart==0.0.20
-slowapi==0.1.9
