@@ -1,293 +1,132 @@
-# Drive Backend API
+# ashtonashton-backend
 
-FastAPI backend for the Ashton Ashton social network and drive applications.
+Two independent FastAPI services — `social/` and `drive/` — for
+ashtonashton.net. Originally one combined app with its own local
+username/password auth and a single SQLite file; both concerns were split
+out and both apps now trust identity forwarded by Traefik instead of doing
+their own auth. See [home-server-auth](../home-server-auth) for the
+identity service both of these depend on.
 
-## Features
+## Architecture
 
-- **User Authentication**: JWT-based authentication with bcrypt password hashing
-- **File Storage**: Upload and manage files with storage quotas
-- **Social Features**: Posts, reactions (dislikes), feed system
-- **Admin Panel**: User and content moderation
-- **Rate Limiting**: Protection against brute force attacks
-- **Security**: HTTPS, CORS, SQL injection prevention
+- **Identity**: neither app has a login, register, or password anywhere in
+  its own code. Both read `X-User-Id` / `X-Username` / `X-User-Role` off
+  incoming requests via a shared `identity.py` dependency (duplicated in
+  each app — small enough that a shared package would be overkill). These
+  headers are only trustworthy because Traefik's ForwardAuth
+  (`auth-free` Middleware, pointing at auth-service's `/verify`) gates every
+  request first and its `authResponseHeaders` setting overwrites them from
+  the verified response — a client cannot set these itself and have them
+  survive the proxy hop. `identity.py` fails closed (401) if the headers are
+  ever missing, with no fallback auth path.
+- **Data**: each app has its own Postgres database (`socialdb`, `drivedb`)
+  on the cluster's shared Postgres instance, with a dedicated least-privilege
+  role per app — `social` can't touch `drive`'s tables or vice versa.
+  SQLAlchemy async + Alembic migrations, same pattern as auth-service.
+  Neither app has a local `users` table anymore; a lightweight `profiles`
+  table (keyed by auth-service's UUID as text) holds app-specific per-user
+  data instead — currently just storage quota tracking for `drive`, an
+  otherwise-empty anchor row for `social`, created lazily on first request
+  from a given user.
+- **Routing**: every real API route lives under `/api/*` in both apps
+  (`api = APIRouter(prefix="/api")`). This lets Traefik route by a single
+  `PathPrefix(`/api`)` rule to the backend Service and everything else to
+  the corresponding frontend Service, on the same domain, without needing a
+  Traefik rule per endpoint. `/health` and `/` stay unprefixed for
+  Kubernetes probes.
+- **Admin**: user-level admin (list/ban/unban/set-role) lives entirely in
+  auth-service now, not here — see that repo's README. `social` keeps only
+  the admin actions that need its own tables: `GET /api/admin/feed`,
+  `DELETE /api/admin/posts/{id}`, gated on `role=super` via the same
+  identity headers.
 
-## Tech Stack
+## Route map
 
-- **Framework**: FastAPI
-- **Database**: SQLite with aiosqlite (async)
-- **Authentication**: JWT tokens (7-day expiration)
-- **Server**: Uvicorn (ASGI server)
+**drive** (`drive.ashtonashton.net`): `GET /api/files`, `POST /api/upload`,
+`GET /api/download/{id}`, `DELETE /api/files/{id}`, `GET /api/usage`,
+`GET /api/me`.
 
-## Prerequisites
+**social** (`ashtonashton.net`): `GET /api/feed`, `POST /api/posts/text`,
+`POST /api/posts/file`, `DELETE /api/posts/{id}`,
+`GET /api/posts/{id}/download`, `POST /api/posts/{id}/dislike`,
+`POST /api/posts/{id}/reply/text`, `POST /api/posts/{id}/reply/file`,
+`GET /api/posts/{id}/replies`, `GET /api/me`,
+`GET /api/admin/feed` (super), `DELETE /api/admin/posts/{id}` (super).
 
-- Python 3.8 or higher
-- pip (Python package manager)
-- 40GB+ storage for user data (configurable)
+Neither app has `/register`, `/login`, `/change-password`, or
+`/admin/users*` — those either moved to auth-service or were deleted
+outright (a couple of dead/duplicate routes from the old combined app
+weren't carried forward at all).
 
-## Quick Start
+## Local development
 
-### 1. Clone the Repository
-
-```bash
-git clone <your-repo-url>
-cd drive-backend
-```
-
-### 2. Run Setup Script
-
-```bash
-./setup-dev.sh
-```
-
-This will:
-- Create a Python virtual environment
-- Install all dependencies
-- Create directory structure
-- Generate .env.example template
-
-### 3. Configure Environment Variables
-
-Create a `.env` file based on `.env.example`:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and set these required variables:
-
-```env
-# Database
-DATABASE_PATH=/mnt/volume_nyc1_02/drive-storage/database/drive.db
-
-# Storage
-STORAGE_PATH=/mnt/volume_nyc1_02/drive-storage/files
-MAX_FILE_SIZE=524288000
-
-# Security
-SECRET_KEY=your-super-secret-key-change-this
-
-# Server
-HOST=127.0.0.1
-PORT=8001
-```
-
-**Important**: Generate a secure SECRET_KEY:
-```bash
-python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-### 4. Start Development Server
+Each app is independent — pick one:
 
 ```bash
-source venv/bin/activate
-uvicorn main:app --reload --host 127.0.0.1 --port 8001
-```
-
-The API will be available at:
-- API: http://127.0.0.1:8001
-- Interactive docs: http://127.0.0.1:8001/docs
-- Alternative docs: http://127.0.0.1:8001/redoc
-
-## Manual Setup (Alternative)
-
-If you prefer manual setup:
-
-```bash
-# Create virtual environment
+cd drive   # or social
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 
-# Create .env file
-nano .env
-
-# Run server
-uvicorn main:app --reload
+cp .env.example .env   # edit DATABASE_URL to point at a local Postgres
+alembic upgrade head
+uvicorn main:app --reload --port 8001
 ```
 
-## Project Structure
-
-```
-drive-backend/
-├── main.py           # Main application and API endpoints
-├── auth.py           # Authentication and JWT handling
-├── database.py       # Database initialization and connection
-├── requirements.txt  # Python dependencies
-├── .env             # Environment variables (create this)
-├── .gitignore       # Git ignore rules
-├── setup-dev.sh     # Development setup script
-└── README.md        # This file
-```
-
-## API Endpoints
-
-### Authentication
-- `POST /register` - Register new user
-- `POST /login` - Login and get JWT token
-- `POST /refresh-token` - Refresh JWT token
-- `POST /change-password` - Change user password
-
-### Files
-- `POST /upload` - Upload file
-- `GET /files` - List user's files
-- `GET /files/{file_id}` - Download file
-- `DELETE /files/{file_id}` - Delete file
-
-### Social
-- `GET /feed` - Get paginated feed of posts
-- `POST /posts/text` - Create text post
-- `POST /posts/file` - Create file post
-- `DELETE /posts/{post_id}` - Delete own post
-- `POST /posts/{post_id}/dislike` - Toggle dislike on post
-
-### Admin (requires admin privileges)
-- `GET /admin/users` - List all users
-- `POST /admin/users/{user_id}/ban` - Ban user
-- `POST /admin/users/{user_id}/unban` - Unban user
-- `DELETE /admin/posts/{post_id}` - Delete any post
-
-### Health
-- `GET /health` - Health check endpoint
-
-## Security Features
-
-1. **JWT Authentication**: 7-day token expiration with refresh capability
-2. **Password Hashing**: bcrypt with salt
-3. **Rate Limiting**: 2 login/register attempts per minute per IP
-4. **CORS**: Configured for specific domains
-5. **SQL Injection Prevention**: Parameterized queries
-6. **File Type Restrictions**: Blocks dangerous file extensions
-
-## Development
-
-### Database Schema
-
-**Users Table**:
-- id, username, password_hash
-- capacity, current_usage
-- is_admin, is_banned
-- created_at
-
-**Files Table**:
-- id, user_id, original_filename, stored_filename
-- file_size, mime_type, file_path
-- is_public, upload_date
-
-**Posts Table**:
-- id, user_id, post_type (text/file)
-- content, file_id, caption
-- created_at
-
-**Reactions Table**:
-- id, post_id, user_id, reaction_type (dislike)
-- created_at
-
-### Running Tests
+Neither app does ForwardAuth locally — simulate it by setting the headers
+by hand:
 
 ```bash
-# Install dev dependencies
-pip install pytest pytest-asyncio httpx
-
-# Run tests
-pytest
+curl http://localhost:8001/api/files \
+  -H 'X-User-Id: 11111111-1111-1111-1111-111111111111' \
+  -H 'X-Username: testuser' \
+  -H 'X-User-Role: free'
 ```
 
-### Database Migrations
+Docs at `http://localhost:8001/docs`.
 
-The database auto-migrates on startup. New columns are added via ALTER TABLE statements in `database.py`.
+## Deployment
 
-## Production Deployment
-
-### Using Systemd
-
-1. Create service file:
+Helm chart per app (`drive/helm/`, `social/helm/`) — Deployment + Service +
+PVC (for uploaded file storage; the database itself is external Postgres,
+not on the PVC). Images built and pushed manually:
 
 ```bash
-sudo nano /etc/systemd/system/drive-backend.service
+cd drive   # or social
+docker buildx build --platform linux/amd64 -t ashtonk216/ashtonashton-drive:X.Y.Z --push .
+# bump helm/values.yaml image.tag, then:
+helm upgrade ashtonahton-drive ./helm -n web
 ```
 
-```ini
-[Unit]
-Description=Drive Backend FastAPI Service
-After=network.target
+`--platform linux/amd64` matters — the k3s node is amd64; an image built on
+Apple Silicon without this flag fails with `exec format error` at container
+start.
 
-[Service]
-User=your-user
-WorkingDirectory=/path/to/drive-backend
-Environment="PATH=/path/to/drive-backend/venv/bin"
-ExecStart=/path/to/drive-backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8001
-Restart=always
+Each app's Postgres credentials come from a pre-existing k8s Secret
+(`drive-postgres-credentials`, `social-postgres-credentials`) in the `web`
+namespace — the chart references it by name, doesn't create it. Traefik's
+`auth-free` Middleware and both apps' IngressRoutes are plain `kubectl
+apply`'d YAML, not part of either Helm chart (small, rarely-changed
+resources; not worth templating).
 
-[Install]
-WantedBy=multi-user.target
-```
+## Migration scripts
 
-2. Enable and start:
+`scripts/migrate_users.py` and `scripts/migrate_posts.py` — one-time,
+already-run scripts that moved the real users and their text posts from the
+old combined app's SQLite backup into the new system. Idempotent (safe to
+re-run, checks for already-migrated rows before inserting) but there's
+nothing left to migrate — kept for reference, not part of normal operation.
+Notably: passwords were **not** carried over (a deliberate clean break, not
+a limitation — see auth-service's README for the reset flow migrated users
+need to go through), and file-post attachments were excluded (their bytes
+live on the old droplet's filesystem, out of scope for that pass).
 
-```bash
-sudo systemctl enable drive-backend
-sudo systemctl start drive-backend
-```
+## Known limitations / possible follow-ups
 
-### Using Nginx (Reverse Proxy)
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name api.yourdomain.com;
-
-    ssl_certificate /path/to/cert.pem;
-    ssl_certificate_key /path/to/key.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:8001;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-}
-```
-
-## Environment Variables Reference
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `DATABASE_PATH` | SQLite database file path | `/data/drive.db` |
-| `STORAGE_PATH` | File storage directory | `/data/files` |
-| `MAX_FILE_SIZE` | Max file size in bytes | `524288000` (500MB) |
-| `SECRET_KEY` | JWT secret key | Generate with `secrets.token_urlsafe(32)` |
-| `HOST` | Server host (dev only) | `127.0.0.1` |
-| `PORT` | Server port (dev only) | `8001` |
-
-## Troubleshooting
-
-### "Missing required environment variables"
-- Make sure `.env` file exists and all required variables are set
-
-### "Permission denied" on storage directory
-- Ensure the user running the app has write permissions to `STORAGE_PATH`
-
-### "Database is locked"
-- SQLite doesn't handle high concurrency well. Consider PostgreSQL for production with high traffic
-
-### Can't connect from frontend
-- Check CORS settings in `main.py`
-- Verify the frontend URL is in the `allow_origins` list
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-Private project - All rights reserved
-
-## Support
-
-For issues or questions, contact the repository owner.
+- The old app's "ban a user" action cascade-deleted their posts; that
+  behavior wasn't rebuilt when ban moved to auth-service (which knows
+  nothing about posts). A banned user's existing posts stay up — a `super`
+  admin can manually clean them up via `/api/admin/feed` /
+  `/api/admin/posts/{id}` after banning, but there's no automatic cascade.
+- `social`'s `/api/admin/feed` returns `user_id` (a UUID), not a resolved
+  username, since there's no local `users` table to join against anymore.
